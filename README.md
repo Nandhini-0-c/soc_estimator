@@ -1,88 +1,69 @@
-%% ===================== ECM MODEL INPUT SETUP ============================
-% This code prepares all necessary variables to be used in Simulink:
-% - SOC_input and Temp_input are time-varying signals (via From Workspace)
-% - R0_LUT, R1_LUT, C1_LUT, R2_LUT, C2_LUT are static 2D lookup tables
-% - SOC_bp and Temp_bp are the breakpoints for the lookup tables
+# 🔋 Battery SOC Estimation using A-SRUKF (SIL Simulation)
 
-%% 1. Define Breakpoints
-SOC_bp = [0.05 0.15 0.25 0.35 0.45 0.55 0.65 0.75 0.85];  % Midpoints of 9 SOC regions
-Temp_bp = [29.5 30.4 31.2 31.4 31.7 31.8 31.9 32.5 33.0 33.8];  % 10 temperature values
+## 📌 Project Overview
 
-%% 2. ECM Values from Your Table (per SOC region)
-R0_vals = [0.0008 0.0012 0.0012 0.0012 0.0012 0.0012 0.0012 0.0014 0.0014];
-R1_vals = [0.0011 0.0010 0.0009 0.0009 0.0010 0.0012 0.0012 0.0011 0.0011];
-C1_vals = [30506.1 31132.8 28978.6 28077.2 30410.7 32308.6 28028.0 29204.8 31794.4];
-R2_vals = [0.0005 0.0004 0.0005 0.0005 0.0004 0.0005 0.0005 0.0005 0.0006];
-C2_vals = [34084.4 38227.7 34895.8 34886.6 35707.0 34720.7 33459.9 35271.3 35678.5];
+This project presents a MATLAB/Simulink-based implementation of a **State of Charge (SOC) Estimation** algorithm for lithium-ion batteries using the **Adaptive Square Root Unscented Kalman Filter (A-SRUKF)**. A **2-RC Equivalent Circuit Model (ECM)** of the battery is used to simulate terminal behavior, and the estimator is tested through a **Software-in-the-Loop (SIL)** simulation environment.
 
-%% 3. Expand ECM values across temperatures (replication)
-R0_LUT = repmat(R0_vals', 1, length(Temp_bp));
-R1_LUT = repmat(R1_vals', 1, length(Temp_bp));
-C1_LUT = repmat(C1_vals', 1, length(Temp_bp));
-R2_LUT = repmat(R2_vals', 1, length(Temp_bp));
-C2_LUT = repmat(C2_vals', 1, length(Temp_bp));
+## 🛠 Key Components
 
-%% 4. Generate Time-Varying SOC and Temperature Inputs
-% Simulation time vector (adjust as needed)
-t = (0:1:100)';  % 0 to 100 seconds, 1 sec interval
+- **Battery Model**: A second-order (2-RC) ECM model simulated in Simulink. Parameters such as internal resistances and capacitances vary with SOC and temperature using 2D lookup tables.
+- **A-SRUKF Algorithm**: SOC estimation is implemented in a MATLAB Function block using an adaptive variant of the Square Root UKF for increased numerical stability and noise adaptation.
+- **SIL Testing**: The estimator is tested with current, voltage, and temperature data directly within the simulation loop (without hardware). It outputs SOC, estimated terminal voltage, and estimation error.
 
-% Simulated SOC: ramp from 5% to 85%
-SOC_signal = linspace(0.05, 0.85, length(t))';
+## 🎯 Objectives
 
-% Simulated Temperature: oscillates between ~29.5 and 32.5
-Temp_signal = 31 + 1.5 * sin(0.05 * t);
+- Simulate a dynamic battery behavior using a 2-RC ECM.
+- Implement the A-SRUKF algorithm in MATLAB Function block for real-time SOC estimation.
+- Validate estimator performance using SIL methodology.
+- Analyze estimation accuracy through comparison with ECM-generated terminal voltage and known SOC trajectory.
 
-% Combine time and values for Simulink
-SOC_input = [t SOC_signal];
-Temp_input = [t Temp_signal];
+## ⚙️ Simulation Setup
 
-%% 5. Save All Variables to .mat File for Simulink
-save('ECM_ModelData.mat', ...
-     'SOC_input', 'Temp_input', ...
-     'SOC_bp', 'Temp_bp', ...
-     'R0_LUT', 'R1_LUT', 'C1_LUT', 'R2_LUT', 'C2_LUT');
- 
- 
- 
- 
- 
-% code for the ocv lookup table
-%% 1. OCV Table Data (from your values)
-OCV_table = [3.1610, 3.1961, 3.238, 3.2658, 3.2787, ...
-             3.2837, 3.2881, 3.3081, 3.177, 3.4];
+- **Inputs**:
+  - Current profile (discharge/charge)
+  - Terminal voltage from ECM
+  - Temperature profile or fixed value
+- **Outputs**:
+  - Estimated SOC
+  - Estimated terminal voltage
+  - Estimation error
 
-SOC_bp_ocv = linspace(0, 1, length(OCV_table));  % 10 SOC breakpoints from 0 to 1
+- **Tools Used**:
+  - MATLAB R2018
+  - Simulink
+  - Custom MATLAB Function block for A-SRUKF
 
-%% 2. Time-varying SOC input signal (simulate SOC over time)
-t_ocv = (0:1:99)';  % 100 seconds, 1s interval
+## 📈 Results
 
-% Example: SOC decreasing from 1 to 0 (typical for discharge)
-SOC_signal_ocv = linspace(1, 0, length(t_ocv))';
+- The estimator successfully tracked the SOC over a wide range of current and voltage conditions.
+- The estimated terminal voltage closely matched the ECM's actual output.
+- Time-series plots confirmed the accuracy and responsiveness of the A-SRUKF estimator.
 
-% Format for Simulink From Workspace block
-SOC_input_ocv = [t_ocv, SOC_signal_ocv];
+## 🧠 Algorithms Used
 
-%% 3. Save everything to .mat file
-save('OCV_LUT_and_Input.mat', ...
-     'OCV_table', 'SOC_bp_ocv', 'SOC_input_ocv');
+- **Adaptive Square Root Unscented Kalman Filter (A-SRUKF)**:
+  - Nonlinear estimation method suitable for dynamic battery systems.
+  - Provides better numerical stability and real-time adaptability.
+  - Accounts for modeling uncertainty and noise covariance tuning.
 
- 
- %code for the current input
- %% 1. Define Breakpoints (SOC levels from 0 to 1)
-SOC_bp_current = linspace(0, 1, 10);  % 10 points
+## ✅ Project Status
 
-%% 2. Table Data (Current values at each SOC point)
-Current_table = 50 * ones(1, 10);  % All values = 50A
+- [x] ECM modeled in Simulink
+- [x] A-SRUKF implemented in MATLAB Function block
+- [x] Integrated and tested in SIL environment
+- [x] Simulation results analyzed and documented
 
-%% 3. Time-Varying SOC Input (to drive the Lookup Table)
-t_current = (0:1:99)';  % 0 to 99 seconds, 1-second interval
+## 📝 Notes
 
-% Simulated SOC: decreasing linearly from 1 → 0
-SOC_signal_current = linspace(1, 0, length(t_current))';
-SOC_input_current = [t_current, SOC_signal_current];  % [time, value] format
+> This work focuses solely on **Software-in-the-Loop (SIL)** simulation. Real-time HIL/OPAL-RT testing is not included in this repository version.
 
-%% 4. Save All to .mat file
-save('Current_LUT_and_Input.mat', ...
-     'SOC_input_current', 'SOC_bp_current', 'Current_table');
+## 📚 References
+
+1. He, H., Xiong, R., Fan, J. (2011). *Evaluation of lithium-ion battery equivalent circuit models for state of charge estimation by an experimental approach*. Energies.
+2. Plett, G. L. (2004). *Extended Kalman filtering for battery management systems of LiPB-based HEV battery packs: Part 3. State and parameter estimation*. Journal of Power Sources.
+
+---
+
+
 
 
