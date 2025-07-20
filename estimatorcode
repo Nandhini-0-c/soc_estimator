@@ -1,0 +1,257 @@
+function [SOC_Est, Vt_Est, Vt_Err] = ASRUKF_Realtime(Current, Vt_Actual, Temperature, Time)
+%#codegen
+
+% Persistent variables to maintain state between function calls
+persistent x_hat S SQ SR ev_history innovation_count k_count
+persistent SOC_Init QN eta deltaT SOCOCV dSOCOCV
+persistent param_T param_SOC param_R0 param_R1 param_R2 param_C1 param_C2
+persistent alpha beta kappa lambda w_m w_c b M SQ_min SR_min initialized
+
+% Initialize on first call
+if isempty(initialized)
+   
+    % Battery Parameters
+    SOC_Init = 0.3;
+    QN = 4.81 * 3600;
+    eta = 1.0;
+    deltaT = 1;
+   
+    % ASRUKF Parameters
+    n = 3;
+    alpha = 0.01;
+    beta = 2;
+    kappa = 3 - n;
+    lambda = alpha^2 * (n + kappa) - n;
+   
+    % Weights
+    w_m = zeros(2*n+1, 1);
+    w_c = zeros(2*n+1, 1);
+    w_m(1) = lambda/(n+lambda);
+    w_c(1) = w_m(1) + (1 - alpha^2 + beta);
+    for i = 2:2*n+1
+        w_m(i) = 1/(2*(n+lambda));
+        w_c(i) = w_m(i);
+    end
+   
+    % Initial state and covariance
+    x_hat = [SOC_Init; 0; 0];
+    P_init = [0.25 0 0; 0 0.05 0; 0 0 0.05];
+    S = chol(P_init, 'lower');
+   
+    % Process and measurement noise
+    Q_init = [5e-4 0 0; 0 1.0e-6 0; 0 0 1.0e-6];
+    SQ = chol(Q_init, 'lower');
+    SR = sqrt(1.0e-4);
+   
+    % Adaptive parameters
+    b = 0.95;
+    M = 10;
+    ev_history = zeros(M, 1);
+    innovation_count = 0;
+    k_count = 0;
+   
+    % Minimum noise bounds
+    SQ_min = diag([1.0e-6, 1.0e-8, 1.0e-8]);
+    SR_min = 1.0e-5;
+   
+    % *** YOUR ACTUAL BATTERY PARAMETERS ***
+    % Temperature points
+    param_T =  [29.5 30.4 31.2 31.4 31.7 31.8 31.9 32.5 33.0 33.8];
+   
+    % SOC points
+    param_SOC =  [0.05 0.15 0.25 0.35 0.45 0.55 0.65 0.75 0.85 0.85]; 
+   
+    % R0 parameter values
+    param_R0 = [0.0008 0.0012 0.0012 0.0012 0.0012 0.0012 0.0012 0.0014 0.0014];
+    % R1 parameter values
+    param_R1 = [0.0011 0.0010 0.0009 0.0009 0.0010 0.0012 0.0012 0.0011 0.0011];
+    % R2 parameter values
+    param_R2 = [0.0005 0.0004 0.0005 0.0005 0.0004 0.0005 0.0005 0.0005 0.0006];
+   
+    % C1 parameter values
+    param_C1 = [30506.1 31132.8 28978.6 28077.2 30410.7 32308.6 28028.0 29204.8 31794.4];
+   
+    % C2 parameter values
+    param_C2 = [34084.4 38227.7 34895.8 34886.6 35707.0 34720.7 33459.9 35271.3 35678.5];
+    % *** YOUR ACTUAL SOC-OCV DATA ***
+    % SOC-OCV polynomial coefficients (order 6)
+    SOCOCV = [-4.746665e+01, 1.649823e+02, -2.283789e+02, 1.610269e+02, -6.045348e+01, 1.166351e+01, 2.823836e+00];
+    dSOCOCV = polyder(SOCOCV);
+   
+    initialized = true;
+end
+
+% Increment sample counter
+k_count = k_count + 1;
+
+% Current state
+SOC = x_hat(1);
+V1 = x_hat(2);
+V2 = x_hat(3);
+
+% Get battery parameters using nearest neighbor interpolation
+% (since your data points are scattered, not on a regular grid)
+distances = sqrt((param_SOC - SOC).^2 + ((param_T - Temperature)/50).^2);
+[~, idx] = min(distances);
+
+R0 = param_R0(idx);
+R1 = param_R1(idx);
+R2 = param_R2(idx);
+C1 = param_C1(idx);
+C2 = param_C2(idx);
+
+% Calculate discrete-time parameters
+Tau_1 = C1 * R1;
+Tau_2 = C2 * R2;
+a1 = exp(-deltaT/Tau_1);
+a2 = exp(-deltaT/Tau_2);
+b1 = R1 * (1 - exp(-deltaT/Tau_1));
+b2 = R2 * (1 - exp(-deltaT/Tau_2));
+
+% OCV calculation
+OCV = polyval(SOCOCV, SOC);
+
+% Calculate outputs
+Vt_Est = OCV - R0*Current - V1 - V2;
+SOC_Est = SOC;
+Vt_Err = Vt_Actual - Vt_Est;
+
+% Skip update for first sample
+if k_count == 1
+    return;
+end
+
+% ASRUKF Update Steps
+n = 3;
+
+% System matrices
+A = [1, 0, 0; 0, a1, 0; 0, 0, a2];
+B = [-(eta * deltaT/QN); b1; b2];
+
+% Generate sigma points
+sqrt_term = sqrt(n + lambda) * S;
+chi = [x_hat, x_hat + sqrt_term, x_hat - sqrt_term];
+
+% Time update
+chi_pred = zeros(3, 2*n+1);
+for i = 1:2*n+1
+    chi_pred(:, i) = A * chi(:, i) + B * Current;
+    chi_pred(1, i) = max(0.01, min(0.99, chi_pred(1, i))); % SOC bounds
+end
+
+% Predicted state mean
+x_pred = zeros(3, 1);
+for i = 1:2*n+1
+    x_pred = x_pred + w_m(i) * chi_pred(:, i);
+end
+
+% Predicted covariance square root
+X_dev = chi_pred(:, 2:end) - x_pred;
+for i = 1:2*n
+    X_dev(:, i) = sqrt(abs(w_c(i+1))) * X_dev(:, i);
+end
+
+[~, S_pred] = qr([X_dev, SQ]', 0);
+S_pred = S_pred';
+
+% Cholupdate for first sigma point
+if w_c(1) >= 0
+    S_pred = cholupdate(S_pred, sqrt(w_c(1)) * (chi_pred(:, 1) - x_pred), '+');
+else
+    S_pred = cholupdate(S_pred, sqrt(abs(w_c(1))) * (chi_pred(:, 1) - x_pred), '-');
+end
+
+% Measurement update
+sqrt_term = sqrt(n + lambda) * S_pred;
+chi_pred = [x_pred, x_pred + sqrt_term, x_pred - sqrt_term];
+
+% Measurement prediction
+z_pred = zeros(1, 2*n+1);
+for i = 1:2*n+1
+    soc_i = max(0.01, min(0.99, chi_pred(1, i)));
+    v1_i = chi_pred(2, i);
+    v2_i = chi_pred(3, i);
+   
+    % Get parameters for current sigma point
+    distances_i = sqrt((param_SOC - soc_i).^2 + ((param_T - Temperature)/50).^2);
+    [~, idx_i] = min(distances_i);
+    R0_i = param_R0(idx_i);
+   
+    OCV_i = polyval(SOCOCV, soc_i);
+    z_pred(i) = OCV_i - R0_i*Current - v1_i - v2_i;
+end
+
+% Predicted measurement mean
+z_mean = 0;
+for i = 1:2*n+1
+    z_mean = z_mean + w_m(i) * z_pred(i);
+end
+
+% Calculate Kalman gain
+Z_dev = z_pred(2:end) - z_mean;
+for i = 1:2*n
+    Z_dev(i) = sqrt(abs(w_c(i+1))) * Z_dev(i);
+end
+
+[~, Szz] = qr([Z_dev, SR]', 0);
+Szz = Szz(1,1);
+
+if w_c(1) >= 0
+    Szz = cholupdate(Szz, sqrt(abs(w_c(1))) * (z_pred(1) - z_mean), '+');
+else
+    Szz = cholupdate(Szz, sqrt(abs(w_c(1))) * (z_pred(1) - z_mean), '-');
+end
+
+% Cross-covariance
+Pxz = zeros(3, 1);
+for i = 1:2*n+1
+    Pxz = Pxz + w_c(i) * (chi_pred(:, i) - x_pred) * (z_pred(i) - z_mean);
+end
+
+% Kalman gain
+K = Pxz / (Szz * Szz');
+
+% State update
+innovation = Vt_Actual - z_mean;
+x_hat = x_pred + K * innovation;
+x_hat(1) = max(0.01, min(0.99, x_hat(1))); % SOC bounds
+
+% Covariance update
+%try
+    S = cholupdate(S_pred, K * Szz, '-');
+%catch
+    % Fallback to Joseph form
+    %H_jacobian = [polyval(dSOCOCV, x_hat(1)), -1, -1];
+    %I_KH = eye(3) - K * H_jacobian;
+    %P_new = I_KH * (S_pred * S_pred') * I_KH' + K * (SR^2) * K';
+    %P_new = P_new + 1e-8 * eye(3);
+    %S = chol(P_new, 'lower');
+%end
+
+% Adaptive noise estimation
+innovation_count = innovation_count + 1;
+
+if innovation_count <= M
+    ev_history(innovation_count) = innovation^2;
+else
+    ev_history = [ev_history(2:end); innovation^2];
+end
+
+if innovation_count >= M
+    F_k = mean(ev_history);
+    d_k = (1 - b^k_count)/(1 - b^(k_count+1));
+   
+    Q_factor = sqrt(F_k);
+    SQ_new = diag([Q_factor*1e-3, Q_factor*1e-5, Q_factor*1e-5]) + SQ_min;
+    SQ = (1 - d_k) * SQ + d_k * SQ_new;
+   
+    SR_new = sqrt(F_k) + SR_min;
+    SR = (1 - d_k) * SR + d_k * SR_new;
+end
+
+% Update outputs with current estimates
+SOC_Est = x_hat(1);
+Vt_Est = OCV - R0*Current - x_hat(2) - x_hat(3);
+Vt_Err = Vt_Actual - Vt_Est;
+
+end
